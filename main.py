@@ -142,7 +142,9 @@ FACTOR_OPTIONS = [
 ]
 
 # Bond notionals: + = long the bond, - = short. The trade series is the P&L of these positions.
-HEDGE_TABLE_COLUMNS = ['Leg', 'Tenor', 'Notional (+ long bond)', 'Par DV01']
+HEDGE_TABLE_COLUMNS = ['Leg', 'Tenor', 'Notional (+ long bond)', 'Par DV01 ($/bp per $1mm)']
+# Butterfly._par_dv01 is per $100 face; $1mm notional is 10,000 x $100
+DV01_PER_MM = 10_000
 
 OU_TABLE_COLUMNS = ['Parameter', 'Value']
 PLACEHOLDER_VALUE = '—'
@@ -654,22 +656,28 @@ def ou_table_rows(mr_result):
             ('Mean reversion speed λ (per day)', fmt(model.lamda, '.4f')),
             ('Long-run mean μ (bp)', fmt(model.mu, '.2f')),
             ('Half-life ln(2)/λ (days)', PLACEHOLDER_VALUE),
-            ('Mean first passage (days)', PLACEHOLDER_VALUE),
-            ('Mode first passage (days)', PLACEHOLDER_VALUE),
-            ('P(first passage ≤ half-life)', PLACEHOLDER_VALUE),
+            ('Target: halfway from current level to μ (bp)', PLACEHOLDER_VALUE),
+            ('Mean days to reach target', PLACEHOLDER_VALUE),
+            ('Mode days to reach target', PLACEHOLDER_VALUE),
+            (f'P(reach target within {FUTURE_N} days)', PLACEHOLDER_VALUE),
+            ('P(reach target within half-life | reached)', PLACEHOLDER_VALUE),
         ])
 
     hitting_times = mr_result.hitting_times
     mean_fp, mode_fp = first_passage_stats(hitting_times)
-    # (hitting_times <= half_life).sum() / len(hitting_times), i.e. among paths that hit
+    # Share of all simulated paths that reach the target within the horizon
+    p_hit = len(hitting_times) / FPT_N_PATHS
+    # Notebook: (hitting_times <= half_life).sum() / len(hitting_times), i.e. only among paths that hit
     p_half_life = (hitting_times <= model.half_life).sum() / len(hitting_times)
     return table_rows([
         ('Mean reversion speed λ (per day)', fmt(model.lamda, '.4f')),
         ('Long-run mean μ (bp)', fmt(model.mu, '.2f')),
         ('Half-life ln(2)/λ (days)', fmt(model.half_life, '.1f')),
-        ('Mean first passage (days)', fmt(mean_fp, '.0f')),
-        ('Mode first passage (days)', fmt(mode_fp, '.0f')),
-        ('P(first passage ≤ half-life)', f'{p_half_life:.1%}'),
+        ('Target: halfway from current level to μ (bp)', fmt(model.target, '.2f')),
+        ('Mean days to reach target', fmt(mean_fp, '.0f')),
+        ('Mode days to reach target', fmt(mode_fp, '.0f')),
+        (f'P(reach target within {FUTURE_N} days)', f'{p_hit:.1%}'),
+        ('P(reach target within half-life | reached)', f'{p_half_life:.1%}'),
     ])
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title='Yield Curve Dashboard')
@@ -729,7 +737,7 @@ def update_pca_tab(preset, lookback):
         trade_figure(result),
     ]
     hedge_rows = [
-        (name, TENOR_LABELS[tenor], f'{ratio:.3f}', f'{result.model.dv01[tenor].iloc[-1]:.4f}')
+        (name, TENOR_LABELS[tenor], f'{ratio:.3f}', f'${result.model.dv01[tenor].iloc[-1] * DV01_PER_MM:,.0f}')
         for name, tenor, ratio in zip(spec['leg_names'], result.legs, result.hedge_ratios)
     ]
     return (
