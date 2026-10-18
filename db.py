@@ -12,8 +12,10 @@ def get_engine():
     """Heroku Postgres if DATABASE_URL is set, otherwise a local SQLite file."""
     url = os.environ.get('DATABASE_URL')
     if url:
-        # Heroku uses the old postgres:// scheme, which SQLAlchemy no longer accepts
-        url = url.replace('postgres://', 'postgresql://', 1)
+        # Heroku uses postgres://, which SQLAlchemy rejects, and SQLAlchemy 2.1 defaults to the
+        # psycopg (v3) driver. Name psycopg2 explicitly to match psycopg2-binary in requirements.txt
+        url = url.split('://', 1)[1]
+        url = f'postgresql+psycopg2://{url}'
     else:
         LOCAL_DB.parent.mkdir(exist_ok=True)
         url = f'sqlite:///{LOCAL_DB}'
