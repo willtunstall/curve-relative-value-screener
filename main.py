@@ -1,6 +1,4 @@
 import time
-from functools import lru_cache
-from pathlib import Path
 from typing import NamedTuple, Optional
 
 import dash
@@ -8,36 +6,27 @@ import dash_bootstrap_components as dbc
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 from dash import dcc, html, Input, Output
 from scipy import stats  # installed with statsmodels, which mean_reversion.py already needs
 
+import db
 from butterfly_pca import Butterfly, Steepener
 from mean_reversion import MeanRev
-from fetch_yields import get_treasury_data  # temporary: main.py switches to db.load_yields() in step 4
 
-CACHE_PATH = Path(__file__).parent / 'data_cache' / 'treasury_par_yields.pkl'
-CACHE_MAX_AGE = 24 * 60 * 60  # FRED updates daily
+# Yields are written to the database each morning by fetch_yields.py. They're re-read at most
+# once an hour, so new data is picked up without a restart and the database isn't hit on every click.
+YIELDS_MAX_AGE = 60 * 60  # seconds
+_yields = {'data': None, 'loaded_at': 0.0}
 
-def load_treasury_data(max_age=CACHE_MAX_AGE):
-    """Return par yields from the disk cache if fresh, otherwise fetch from FRED and re-cache."""
-    if CACHE_PATH.exists() and time.time() - CACHE_PATH.stat().st_mtime < max_age:
-        return pd.read_pickle(CACHE_PATH)
 
-    try:
-        data = get_treasury_data()
-    except (ValueError, requests.RequestException):
-        if CACHE_PATH.exists(): # Revert to old data if FRED is down
-            return pd.read_pickle(CACHE_PATH)
-        raise
+def get_yields():
+    if time.time() - _yields['loaded_at'] > YIELDS_MAX_AGE:
+        _yields['data'] = db.load_yields()
+        _yields['loaded_at'] = time.time()
+    return _yields['data']
 
-    CACHE_PATH.parent.mkdir(exist_ok=True)
-    data.to_pickle(CACHE_PATH)
-    return data
 
-treasury_par_yields = load_treasury_data()
-
-# Keys match the column names produced by get_treasury_data()
+# Keys match the column names written by fetch_yields.py
 TENOR_LABELS = {
     '1MO': '1M', '3MO': '3M', '6MO': '6M', '1': '1Y', '2': '2Y', '3': '3Y',
     '5': '5Y', '7': '7Y', '10': '10Y', '20': '20Y', '30': '30Y',
@@ -158,7 +147,7 @@ BRAND = '#1f3a5f'
 MUTED = '#9aa5b1'
 FACTOR_COLORS = ['#1f3a5f', '#e07a1f', '#2a9d8f']
 
-# Cached results
+# Model results
 class TradeResult(NamedTuple):
     model: Butterfly          # Butterfly or Steepener (Steepener inherits from Butterfly)
     structure: str            # key into STRUCTURES
@@ -178,16 +167,12 @@ def lookback_slice(df, lookback):
     return df.iloc[-lookback:] if lookback else df
 
 
-CACHE_SIZE = len(TRADE_PRESETS) * len(LOOKBACK_OPTIONS)  # one entry per (preset, lookback)
-
-
-@lru_cache(maxsize=CACHE_SIZE)
 def get_trade(preset, lookback):
     """PCA fit and hedged trade for one (preset, lookback). Shared by the PCA and Mean Reversion tabs."""
     structure = structure_of(preset)
     spec = STRUCTURES[structure]
     legs = TRADE_PRESETS[preset]
-    yields = lookback_slice(treasury_par_yields[PCA_UNIVERSE], lookback)
+    yields = lookback_slice(get_yields()[PCA_UNIVERSE], lookback)
     model = spec['model'](yields, legs)
     series, hedge_ratios = getattr(model, spec['construct'])()
     # The classes only keep the first three eigenvectors, so eigenvalues are recomputed here
@@ -195,10 +180,9 @@ def get_trade(preset, lookback):
     return TradeResult(model, structure, legs, series, hedge_ratios, eigenvalues)
 
 
-@lru_cache(maxsize=CACHE_SIZE)
-def get_mean_reversion(preset, lookback):
-    """OU fit and Monte Carlo first passage times for one (preset, lookback)."""
-    model = MeanRev(get_trade(preset, lookback).series)
+def get_mean_reversion(trade_result):
+    """OU fit and Monte Carlo first passage times for a trade series."""
+    model = MeanRev(trade_result.series)
     if not (np.isfinite(model.lamda) and model.lamda > 0):
         # AR(1) coefficient outside (0, 1): sigma is NaN and no simulated path would ever hit the target
         return MeanRevResult(model, np.array([]), 'Not mean reverting over this calibration window')
@@ -450,7 +434,8 @@ def build_layout():
 
 def yield_curve_figure(snapshots):
     x_title, y_title = 'Maturity', 'Yield (%)'
-    offsets = [s for s in sorted(snapshots or []) if s < len(treasury_par_yields)]
+    yields = get_yields()
+    offsets = [s for s in sorted(snapshots or []) if s < len(yields)]
     if not offsets:
         return placeholder_figure('', x_title, y_title, 'Select at least one snapshot date')
 
@@ -458,7 +443,7 @@ def yield_curve_figure(snapshots):
     labels = [TENOR_LABELS[t] for t in ALL_TENORS]
     fig = go.Figure()
     for offset in offsets:
-        row = treasury_par_yields.iloc[-1 - offset]
+        row = yields.iloc[-1 - offset]
         fig.add_trace(go.Scatter(
             x=maturities, y=row[ALL_TENORS].values, mode='lines+markers',
             name=f'{option_label(offset, SNAPSHOT_OPTIONS)} ({row.name:%d %b %Y})',
@@ -475,7 +460,7 @@ def yield_timeseries_figure(tenors, lookback):
     if not tenors:
         return placeholder_figure('', x_title, y_title, 'Select at least one tenor')
 
-    data = lookback_slice(treasury_par_yields, lookback)
+    data = lookback_slice(get_yields(), lookback)
     fig = go.Figure()
     for tenor in sorted(tenors, key=TENOR_YEARS.get):
         fig.add_trace(go.Scatter(x=data.index, y=data[tenor], mode='lines', name=TENOR_LABELS[tenor]))
@@ -583,14 +568,6 @@ def ou_figure(trade_result, mr_result):
         return style_figure(fig, mr_result.error, 'Date', y_title)
 
     paths = model.future_paths_df
-    # project_future_path fills its frame by chained assignment, which is a no-op under pandas
-    # Copy-on-Write (default from pandas 3.0). Only plot the projection if it was actually filled.
-    if not np.isclose(paths['future_path'].iloc[0], series.iloc[-1]):
-        fig.add_annotation(text='Projection unavailable: MeanRev.project_future_path returned an empty frame',
-                           xref='paper', yref='paper', x=0.5, y=0.05, showarrow=False,
-                           font={'size': 11, 'color': MUTED})
-        return style_figure(fig, name, 'Date', y_title)
-
     projected = paths.iloc[1:-1]  # notebook plots iloc[1:-1]
     for column, label, color in [
         ('future_path', 'Expected Future Path (Mean)', NB_BLUE),
@@ -772,7 +749,7 @@ def update_hedge_check(preset, lookback, factor):
 )
 def update_mean_reversion_tab(preset, lookback):
     trade_result = get_trade(preset, lookback)
-    mr_result = get_mean_reversion(preset, lookback)  # vectorised Monte Carlo, cached per selection
+    mr_result = get_mean_reversion(trade_result)  # vectorised Monte Carlo, recomputed on each selection
     return ou_figure(trade_result, mr_result), fpt_figure(mr_result), ou_table_rows(mr_result)
 
 
