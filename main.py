@@ -14,18 +14,7 @@ from scipy import stats  # installed with statsmodels, which mean_reversion.py a
 
 from butterfly_pca import Butterfly, Steepener
 from mean_reversion import MeanRev
-from yield_data import get_fred_data
-
-def get_treasury_data():
-    treasury_tickers = [
-        'DGS1MO', 'DGS3MO', 'DGS6MO', 'DGS1', 'DGS2', 'DGS3', 'DGS5', 'DGS7', 'DGS10', 'DGS20', 'DGS30'
-    ]
-    treasury_yields = get_fred_data(treasury_tickers[0])
-    for ticker in treasury_tickers[1:]:
-        treasury_yields = treasury_yields.join(get_fred_data(ticker), on='date', how='inner')
-    treasury_yields.columns = [str(x[3:]) for x in treasury_yields.columns]
-    treasury_yields = treasury_yields.apply(pd.to_numeric, errors='coerce')
-    return treasury_yields.dropna()
+from fetch_yields import get_treasury_data  # temporary: main.py switches to db.load_yields() in step 4
 
 CACHE_PATH = Path(__file__).parent / 'data_cache' / 'treasury_par_yields.pkl'
 CACHE_MAX_AGE = 24 * 60 * 60  # FRED updates daily
