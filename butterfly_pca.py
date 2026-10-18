@@ -134,13 +134,13 @@ class Steepener(Butterfly):
 
         lower, upper = self.tenors
 
-        hedge_ratio = -(self.dv01[upper].iloc[-1] / self.dv01[lower].iloc[-1]) * (self.eig_v.loc[upper, 0] / self.eig_v.loc[lower, 0])
+        hedge_ratio = (self.dv01[upper].iloc[-1] / self.dv01[lower].iloc[-1]) * (self.eig_v.loc[upper, 0] / self.eig_v.loc[lower, 0])
 
-        steepener = ((self.dv01[lower].iloc[-1] * hedge_ratio * self.y_dm[lower]) +
+        steepener = ((-self.dv01[lower].iloc[-1] * hedge_ratio * self.y_dm[lower]) +
                      (self.dv01[upper].iloc[-1] * 1 * self.y_dm[upper])
                      ) * (100/self.dv01[upper].iloc[-1])
 
-        return steepener, np.array([hedge_ratio, 1])
+        return steepener, np.array([hedge_ratio, -1])
 
 def main():
     fed_data = pd.read_csv('feds200628.csv', skiprows=9)
@@ -164,7 +164,7 @@ def main():
     factors = steepener.factors
     steepener_series, hedge_ratios = steepener.construct_steepener()
 
-    print(hedge_ratios)
+    print(hedge_ratios, steepener_series)
 
 
 if __name__ == "__main__":

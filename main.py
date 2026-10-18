@@ -73,7 +73,9 @@ STRUCTURES = {
         'reference_leg': 'belly',
         'hedged_factors': (0, 1),  # PC1 and PC2 neutral
         'residual_model': '2-factor model',
-        'axis': 'Butterfly (bp)',
+        # Series level = first-order bond P&L vs a position opened at sample-mean yields, in bp of the
+        # reference-leg yield. Changes between dates are the P&L of holding the position.
+        'axis': 'P&L vs sample mean (bp of belly)',
     },
     'steepener': {
         'label': 'Steepener',
@@ -85,7 +87,7 @@ STRUCTURES = {
         'reference_leg': 'long leg',
         'hedged_factors': (0,),  # PC1 neutral only
         'residual_model': '1-factor model',
-        'axis': 'Steepener (bp)',
+        'axis': 'P&L vs sample mean (bp of long leg)',
     },
 }
 STRUCTURE_OPTIONS = [{'label': spec['label'], 'value': key} for key, spec in STRUCTURES.items()]
@@ -116,7 +118,7 @@ SNAPSHOT_OPTIONS = [
 
 # Mean reversion settings, matching us_treasury_pca.ipynb (not user-controlled)
 FUTURE_N = 150           # projection / simulation horizon (notebook future_n; MeanRev.__init__ projects 150)
-FPT_N_PATHS = 10_000     # hard-coded as sim_n inside MeanRev.vectorised_first_pass_sim (notebook uses 5,000); display only
+FPT_N_PATHS = 10_000     # hard-coded as sim_n inside MeanRev.vectorised_first_pass_sim; display only
 FPT_BINS = 100           # notebook: ax.hist(..., bins=100)
 HISTORY_START = 100      # notebook: ax.set_xlim(butterfly_price_dm.index[100], ...)
 
@@ -128,7 +130,8 @@ PCA_GRAPHS = [
     ('pca-eigenvectors-graph', 'Eigenvectors', 'Loadings by tenor', 'Maturity', 'Loading'),
     ('pca-factors-graph', 'PCA Factors', 'PC1 level, PC2 slope, PC3 curvature', 'Date', 'Factor'),
     ('pca-residuals-graph', 'Factor Residuals', '2-factor model, latest observation', 'Maturity', 'Residual (bp)'),
-    ('pca-trade-graph', 'PCA-Hedged Trade', 'DV01 and PC1/PC2 neutral', 'Date', 'Butterfly (bp)'),
+    ('pca-trade-graph', 'PCA-Hedged Trade', 'Bond P&L vs sample-mean yields, DV01 and PC1/PC2 neutral',
+     'Date', 'P&L vs sample mean (bp of belly)'),
 ]
 
 # The hedge check has its own factor selector, so it is built and updated separately
@@ -138,7 +141,8 @@ FACTOR_OPTIONS = [
     {'label': 'PC3: Curvature', 'value': 2},
 ]
 
-HEDGE_TABLE_COLUMNS = ['Leg', 'Tenor', 'Hedge ratio', 'Par DV01']
+# Bond notionals: + = long the bond, - = short. The trade series is the P&L of these positions.
+HEDGE_TABLE_COLUMNS = ['Leg', 'Tenor', 'Notional (+ long bond)', 'Par DV01']
 
 OU_TABLE_COLUMNS = ['Parameter', 'Value']
 PLACEHOLDER_VALUE = '—'
@@ -188,6 +192,10 @@ def get_mean_reversion(trade_result):
         return MeanRevResult(model, np.array([]), 'Not mean reverting over this calibration window')
     hitting_times = model.vectorised_first_pass_sim(n=FUTURE_N)  # also sets model.target and model.direction
     return MeanRevResult(model, hitting_times, None)
+
+
+# Dash app build
+
 
 def tenor_options(tenors):
     return [{'label': TENOR_LABELS[t], 'value': t} for t in tenors]
@@ -386,7 +394,8 @@ def pca_analysis_tab():
     cards = [graph_card(title, gid, sub, x, y) for gid, title, sub, x, y in PCA_GRAPHS]
     cards.append(graph_card(
         'Hedge Check', 'pca-hedge-check-graph',
-        'Trade vs factor, flat for the hedged factors when the hedge holds', 'PC1', 'Butterfly (bp)',
+        'Trade vs factor, flat for the hedged factors when the hedge holds', 'PC1',
+        'P&L vs sample mean (bp of belly)',
         controls=control('Factor', button_radio('pca-hedge-factor', FACTOR_OPTIONS, 0)),
     ))
     return html.Div([controls, hedge_table, *graph_grid(cards)], className='tab-body')
@@ -400,8 +409,9 @@ def mean_reversion_tab():
     )
     cards = [
         graph_card(
-            'OU Process', 'mr-ou-graph', f'Expected future path (mean) with 2σ bands, {FUTURE_N} days ahead',
-            'Date', 'Trade (bp)',
+            'OU Process', 'mr-ou-graph',
+            f'Bond P&L vs sample-mean yields, expected future path (mean) with 2σ bands, {FUTURE_N} days ahead',
+            'Date', 'P&L vs sample mean (bp)',
         ),
         graph_card(
             'First Passage Time Density', 'mr-fpt-graph',
@@ -428,9 +438,8 @@ def build_layout():
     ])
 
 
-# ---------------------------------------------------------------------------
 # Figures: Yield Analysis
-# ---------------------------------------------------------------------------
+
 
 def yield_curve_figure(snapshots):
     x_title, y_title = 'Maturity', 'Yield (%)'
@@ -521,8 +530,10 @@ def trade_figure(result):
     series = result.series
     fig = go.Figure(go.Scatter(x=series.index, y=series, mode='lines', line={'color': BRAND},
                                name=format_tenors(result.legs, sep='-')))
-    fig.add_hline(y=0, line={'color': MUTED, 'width': 1})
-    return style_figure(fig, f'Latest {series.iloc[-1]:.1f} bp', 'Date', STRUCTURES[result.structure]['axis'])
+    fig.add_hline(y=0, line={'color': MUTED, 'width': 1},  # zero = all legs at their sample-mean yields
+                  annotation_text='sample mean', annotation_position='bottom right')
+    return style_figure(fig, f'Latest {series.iloc[-1]:.1f} bp vs sample mean', 'Date',
+                        STRUCTURES[result.structure]['axis'])
 
 
 def hedge_check_figure(result, factor):
@@ -726,7 +737,7 @@ def update_pca_tab(preset, lookback):
         table_rows(hedge_rows),
         f'Notional per unit of {spec["reference_leg"]}, DV01 and {hedged} neutral',
         f'{spec["residual_model"]}, latest observation',
-        f'{spec["label"]}, DV01 and {hedged} neutral',
+        f'{spec["label"]} bond P&L vs sample-mean yields, DV01 and {hedged} neutral',
     )
 
 
