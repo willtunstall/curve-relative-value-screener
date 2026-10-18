@@ -13,8 +13,8 @@ def get_fred_data(ticker):
 
     if response.status_code == 200:
         data_json = response.json()
-        data = pd.DataFrame(pd.Series(data_json)["observations"]).drop(columns=["realtime_start", "realtime_end"],
-                                                                       axis=1)
+        # pandas 3.0 rejects columns= together with axis=; columns= already targets columns
+        data = pd.DataFrame(pd.Series(data_json)["observations"]).drop(columns=["realtime_start", "realtime_end"])
         data["date"] = pd.to_datetime(data["date"])
         data = data.rename(columns={"value": ticker})
         data.set_index("date", inplace=True)
